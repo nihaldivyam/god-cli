@@ -1,8 +1,8 @@
-// main.go
 package main
 
 import (
 	"fmt"
+	"god/cmd/alert" // <--- Import the new module
 	"god/cmd/git"
 	"os"
 )
@@ -13,11 +13,11 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Route based on the first argument (the module)
 	switch os.Args[1] {
 	case "git":
-		// Pass arguments excluding 'god' and 'git'
 		git.Handle(os.Args[2:])
+	case "alert": // <--- Add this case
+		alert.Handle(os.Args[2:])
 	case "help":
 		printHelp()
 	default:
@@ -31,6 +31,8 @@ func printHelp() {
 	fmt.Println("Usage: god <module> <command> [flags]")
 	fmt.Println("\nAvailable Modules:")
 	fmt.Println("  git    Manage git repositories")
+	fmt.Println("  alert  Check Prometheus alerts") // <--- Update help text
 	fmt.Println("\nExample:")
 	fmt.Println("  god git pull --path=./work")
+	fmt.Println("  god alert list")
 }
