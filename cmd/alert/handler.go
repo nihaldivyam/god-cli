@@ -5,7 +5,6 @@ import (
 	"os"
 )
 
-// Handle processes 'god alert ...'
 func Handle(args []string) {
 	if len(args) < 1 {
 		printHelp()
@@ -15,6 +14,8 @@ func Handle(args []string) {
 	switch args[0] {
 	case "list":
 		runList(args[1:])
+	case "scan":
+		runScan(args[1:]) // <--- Add this
 	case "help":
 		printHelp()
 	default:
@@ -27,7 +28,8 @@ func Handle(args []string) {
 func printHelp() {
 	fmt.Println("Usage: god alert <command> [flags]")
 	fmt.Println("\nCommands:")
-	fmt.Println("  list    List active alerts (requires local port-forward)")
-	fmt.Println("\nFlags:")
-	fmt.Println("  --url   Alertmanager URL (default: http://localhost:9093)")
+	fmt.Println("  list    List alerts on current cluster")
+	fmt.Println("  scan    Scan multiple Teleport clusters")
+	fmt.Println("\nFlags (scan):")
+	fmt.Println("  --filter  String to match cluster names (e.g. 'kilroy')")
 }

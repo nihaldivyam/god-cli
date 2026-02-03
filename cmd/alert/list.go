@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"strings"
+	"time"
 )
 
 // Alert represents the JSON structure returned by amtool
@@ -16,66 +19,108 @@ type Alert struct {
 }
 
 func runList(args []string) {
-	// 1. Parse Flags
 	listCmd := flag.NewFlagSet("list", flag.ExitOnError)
-	amURL := listCmd.String("url", "http://localhost:9093", "Alertmanager URL")
+	port := listCmd.String("port", "9093", "Local port to forward to")
+	namespace := listCmd.String("n", "monitoring", "Namespace of the Alertmanager service")
+	service := listCmd.String("svc", "svc/alertmanager-operated", "Service name to port-forward")
 	listCmd.Parse(args)
 
-	// 2. Check if amtool is installed
-	if _, err := exec.LookPath("amtool"); err != nil {
-		fmt.Println("❌ Error: 'amtool' is not installed or not in PATH.")
-		fmt.Println("Please install it first: go install github.com/prometheus/alertmanager/cmd/amtool@latest")
+	clusterName := getClusterName()
+	fmt.Printf("🌍 Cluster: %s\n", clusterName)
+
+	alerts, err := FetchAlerts(*namespace, *service, *port)
+	if err != nil {
+		fmt.Printf("❌ Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 3. Execute amtool command
-	// We ask for JSON output so Go can parse it reliably
-	cmd := exec.Command("amtool", "alert", "--alertmanager.url="+*amURL, "-o", "json")
+	printAlerts(alerts)
+}
 
+// FetchAlerts handles the port-forwarding and querying logic
+func FetchAlerts(namespace, service, port string) ([]Alert, error) {
+	// 1. Start Port-Forward
+	// Note: We silence stdout to keep the CLI clean during multi-cluster scans
+	pfCmd := exec.Command("kubectl", "port-forward", service, fmt.Sprintf("%s:%s", port, port), "-n", namespace)
+	if err := pfCmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start port-forward: %v", err)
+	}
+
+	// Ensure cleanup
+	defer func() {
+		if pfCmd.Process != nil {
+			pfCmd.Process.Kill()
+		}
+	}()
+
+	// 2. Wait for Port
+	if !waitForPort("localhost", port, 5*time.Second) {
+		return nil, fmt.Errorf("timed out waiting for port-forward")
+	}
+
+	// 3. Query amtool
+	amURL := fmt.Sprintf("http://localhost:%s", port)
+	cmd := exec.Command("amtool", "alert", "--alertmanager.url="+amURL, "-o", "json")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		fmt.Printf("❌ Failed to contact Alertmanager at %s\n", *amURL)
-		fmt.Println("---------------------------------------------------")
-		fmt.Println("💡 Tip: Did you run the port-forward?")
-		fmt.Println("   kubectl port-forward svc/alertmanager-operated 9093:9093 -n monitoring")
-		fmt.Println("---------------------------------------------------")
-		fmt.Printf("Error details: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("failed to query alertmanager: %v", err)
 	}
 
-	// 4. Parse JSON
+	// 4. Parse
 	var alerts []Alert
 	if err := json.Unmarshal(output, &alerts); err != nil {
-		fmt.Printf("❌ Error parsing amtool output: %v\n", err)
-		os.Exit(1)
+		return nil, fmt.Errorf("invalid json from amtool: %v", err)
 	}
 
-	// 5. Display Results
+	return alerts, nil
+}
+
+func printAlerts(alerts []Alert) {
 	if len(alerts) == 0 {
-		fmt.Println("✅ No active alerts found.")
+		fmt.Println("✅ No active alerts.")
 		return
 	}
-
-	fmt.Printf("🔥 Found %d active alerts:\n\n", len(alerts))
-
+	fmt.Printf("🔥 Found %d active alerts:\n", len(alerts))
 	for _, alert := range alerts {
 		name := alert.Labels["alertname"]
-		namespace := alert.Labels["namespace"]
-
-		// Determine the target (Pod > Instance > Cluster-wide)
+		ns := alert.Labels["namespace"]
 		target := "cluster-wide"
+
 		if pod, ok := alert.Labels["pod"]; ok {
 			target = pod
 		} else if instance, ok := alert.Labels["instance"]; ok {
 			target = instance
 		}
-
-		// Handle missing namespace
-		if namespace == "" {
-			namespace = "global"
+		if ns == "" {
+			ns = "global"
 		}
 
-		// Print formatted output: AlertName -> Namespace/Target
-		fmt.Printf("🔴 %-30s -> %s/%s\n", name, namespace, target)
+		fmt.Printf("   🔴 %-35s -> %s/%s\n", name, ns, target)
+	}
+	fmt.Println("")
+}
+
+// Helper: Get current k8s context
+func getClusterName() string {
+	out, err := exec.Command("kubectl", "config", "current-context").Output()
+	if err != nil {
+		return "Unknown"
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Helper: Wait for TCP port
+func waitForPort(host, port string, timeout time.Duration) bool {
+	start := time.Now()
+	for {
+		if time.Since(start) > timeout {
+			return false
+		}
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return true
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
