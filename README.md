@@ -1,4 +1,4 @@
-# god (Go Ops Daemon)
+# god (Go Operations Daemon)
 
 **god** is a blazing fast, extensible CLI tool designed to automate developer workflows across multiple repositories. 
 
