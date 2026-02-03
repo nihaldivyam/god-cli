@@ -1,8 +1,7 @@
 # god (Go Operations Daemon)
 
-**god** is a blazing fast, extensible CLI tool designed to automate developer workflows across multiple repositories. 
-
-It currently features a robust bulk-git module that allows you to pull, fetch, or inspect updates across hundreds of local repositories concurrently without hanging on network issues or password prompts.
+**god** 
+is a blazing fast, extensible CLI tool designed to automate developer workflows. It features a robust bulk-git module for concurrent updates across hundreds of repos, and an alert module for instant multi-cluster Prometheus monitoring—all without hanging on network issues or password prompts
 
 ## 🚀 Features
 
