@@ -15,7 +15,9 @@ func Handle(args []string) {
 	case "list":
 		runList(args[1:])
 	case "scan":
-		runScan(args[1:]) // <--- Add this
+		runScan(args[1:])
+	case "details":
+		runDetails(args[1:]) // <--- Add this
 	case "help":
 		printHelp()
 	default:
@@ -28,8 +30,9 @@ func Handle(args []string) {
 func printHelp() {
 	fmt.Println("Usage: god alert <command> [flags]")
 	fmt.Println("\nCommands:")
-	fmt.Println("  list    List alerts on current cluster")
-	fmt.Println("  scan    Scan multiple Teleport clusters")
-	fmt.Println("\nFlags (scan):")
-	fmt.Println("  --filter  String to match cluster names (e.g. 'kilroy')")
+	fmt.Println("  list     List alerts on current cluster")
+	fmt.Println("  scan     Scan multiple Teleport clusters")
+	fmt.Println("  details  Scan and run diagnostics on matching alerts")
+	fmt.Println("\nFlags:")
+	fmt.Println("  --filter <name>   Filter clusters (required for details)")
 }
