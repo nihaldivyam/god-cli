@@ -75,7 +75,7 @@ func runScan(args []string) {
 
 		// Reuse the fetch logic from list.go
 		fmt.Printf("🔌 Checking alerts...\n")
-		alerts, err := FetchAlerts(*namespace, *service, *port)
+		alerts, err := FetchAlerts("", *namespace, *service, *port)
 		if err != nil {
 			fmt.Printf("⚠️  Could not fetch alerts: %v\n", err)
 			continue
