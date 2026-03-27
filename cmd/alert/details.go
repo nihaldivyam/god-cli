@@ -11,20 +11,40 @@ import (
 
 func runDetails(args []string) {
 	detailsCmd := flag.NewFlagSet("details", flag.ExitOnError)
-	filter := detailsCmd.String("filter", "", "Filter clusters by name (required)")
+	filter := detailsCmd.String("filter", "", "Filter clusters by name (Teleport)")
+	server := detailsCmd.String("server", "", "Direct SSH connection string (e.g., ubuntu@192.12.3.1)")
 	namespace := detailsCmd.String("n", "monitoring", "Namespace of the Alertmanager service")
 	service := detailsCmd.String("svc", "svc/alertmanager-operated", "Service name to port-forward")
 	port := detailsCmd.String("port", "9093", "Local port to use")
 	detailsCmd.Parse(args)
 
-	if *filter == "" {
-		fmt.Println("❌ Error: --filter is required for details (e.g., --filter staging2)")
+	if *filter == "" && *server == "" {
+		fmt.Println("❌ Error: Must provide either --filter (for Teleport) or --server (for SSH)")
 		os.Exit(1)
 	}
 
-	// 1. TSH Discovery (Reusable logic)
-	// We'll quickly re-implement the discovery to find the target cluster
-	// (You could refactor this into a shared helper in scan.go later)
+	// --- Smart Namespace Override ---
+	actualNamespace := *namespace
+	if *server != "" && actualNamespace == "monitoring" {
+		actualNamespace = "monitoring-linuxaid"
+	}
+
+	// --- BRANCH 1: Direct SSH Server ---
+	if *server != "" {
+		fmt.Printf("\n--------------------------------------------------\n")
+		fmt.Printf("🌐 Connecting via SSH to: %s\n", *server)
+
+		alerts, err := FetchAlerts(*server, actualNamespace, *service, *port)
+		if err != nil {
+			fmt.Printf("⚠️  Could not fetch alerts: %v\n", err)
+			return
+		}
+
+		processAlerts(alerts, *server)
+		return
+	}
+
+	// --- BRANCH 2: Teleport Discovery ---
 	if _, err := exec.LookPath("tsh"); err != nil {
 		fmt.Println("❌ Error: 'tsh' is not installed.")
 		os.Exit(1)
@@ -44,7 +64,6 @@ func runDetails(args []string) {
 		os.Exit(1)
 	}
 
-	// 2. Filter logic
 	var targetClusters []string
 	for _, c := range allClusters {
 		if strings.Contains(c.Name, *filter) {
@@ -59,57 +78,54 @@ func runDetails(args []string) {
 
 	fmt.Printf("🚀 Found %d clusters matching '%s'. Starting diagnosis...\n", len(targetClusters), *filter)
 
-	// 3. Iterate, Login, and Diagnose
 	for _, cluster := range targetClusters {
 		fmt.Printf("\n--------------------------------------------------\n")
 		fmt.Printf("🌐 Connecting to: %s\n", cluster)
 
-		// Login
 		loginCmd := exec.Command("tsh", "kube", "login", cluster)
 		if out, err := loginCmd.CombinedOutput(); err != nil {
 			fmt.Printf("❌ Login failed: %v\n%s\n", err, string(out))
 			continue
 		}
 
-		// Fetch Alerts
 		fmt.Printf("🔌 Checking alerts...\n")
-		alerts, err := FetchAlerts(*namespace, *service, *port)
+		alerts, err := FetchAlerts("", actualNamespace, *service, *port)
 		if err != nil {
 			fmt.Printf("⚠️  Could not fetch alerts: %v\n", err)
 			continue
 		}
 
-		if len(alerts) == 0 {
-			fmt.Println("✅ No active alerts.")
-			continue
+		processAlerts(alerts, "")
+	}
+}
+
+// Helper to keep logic DRY
+func processAlerts(alerts []Alert, server string) {
+	if len(alerts) == 0 {
+		fmt.Println("✅ No active alerts.")
+		return
+	}
+
+	fmt.Printf("🔥 Found %d active alerts:\n", len(alerts))
+	processedRules := make(map[string]bool)
+
+	for _, alert := range alerts {
+		name := alert.Labels["alertname"]
+		ns := alert.Labels["namespace"]
+		target := "cluster-wide"
+		if pod, ok := alert.Labels["pod"]; ok {
+			target = pod
+		}
+		if ns == "" {
+			ns = "global"
 		}
 
-		fmt.Printf("🔥 Found %d active alerts:\n", len(alerts))
+		fmt.Printf("   🔴 %-35s -> %s/%s\n", name, ns, target)
 
-		// 4. Process Alerts & Run Rules
-		processedRules := make(map[string]bool) // To avoid running same rule twice per cluster
-
-		for _, alert := range alerts {
-			name := alert.Labels["alertname"]
-			ns := alert.Labels["namespace"]
-			target := "cluster-wide"
-			if pod, ok := alert.Labels["pod"]; ok {
-				target = pod
-			}
-			if ns == "" {
-				ns = "global"
-			}
-
-			fmt.Printf("   🔴 %-35s -> %s/%s\n", name, ns, target)
-
-			// CHECK RULES
-			if ruleFunc, exists := DiagnosticRules[name]; exists {
-				// Only run the diagnosis once per alert type per cluster
-				// (e.g. don't run 'velero get backup' 10 times if there are 10 backup alerts)
-				if !processedRules[name] {
-					ruleFunc(alert)
-					processedRules[name] = true
-				}
+		if ruleFunc, exists := DiagnosticRules[name]; exists {
+			if !processedRules[name] {
+				ruleFunc(alert, server)
+				processedRules[name] = true
 			}
 		}
 	}

@@ -11,12 +11,27 @@ import (
 )
 
 // RuleFunc defines the function signature for a diagnostic check
-type RuleFunc func(alert Alert)
+type RuleFunc func(alert Alert, server string)
 
 // DiagnosticRules maps an "AlertName" to a specific function
 var DiagnosticRules = map[string]RuleFunc{
 	"VeleroUnsuccessfulBackup": checkVeleroBackup,
 	"ArgoCdAppUnhealthy":       checkArgoUnhealthy,
+}
+
+// --- Helper: Command Execution ---
+
+// runCommand executes a shell string locally or remotely over SSH as root
+func runCommand(server, cmdStr string) ([]byte, error) {
+	if server != "" {
+		fmt.Println("      [SSH] (Touch YubiKey if it blinks...)")
+		// Use sudo -i to ensure root's PATH and kubeconfig are fully loaded
+		remoteCmd := fmt.Sprintf("sudo -i %s", cmdStr)
+		// -t forces PTY so PAM can request the YubiKey
+		return exec.Command("ssh", "-t", server, remoteCmd).CombinedOutput()
+	}
+	// Run locally via shell
+	return exec.Command("sh", "-c", cmdStr).CombinedOutput()
 }
 
 // --- Prometheus Response Structs ---
@@ -34,16 +49,21 @@ type PromResponse struct {
 
 // --- Rule Implementations ---
 
-func checkArgoUnhealthy(alert Alert) {
+func checkArgoUnhealthy(alert Alert, server string) {
 	fmt.Println("\n   🔍 [Diagnosis] Querying Prometheus for unhealthy ArgoCD apps...")
 
-	// 1. Construct the Query
+	// Smart Namespace Override for Prometheus queries
+	promNs := "monitoring"
+	if server != "" {
+		promNs = "monitoring-linuxaid"
+	}
+
 	promQuery := `argocd_app_info{health_status!="Healthy"}`
+	apiPath := fmt.Sprintf("/api/v1/namespaces/%s/services/prometheus-operated:9090/proxy/api/v1/query?query=%s", promNs, url.QueryEscape(promQuery))
 
-	apiPath := fmt.Sprintf("/api/v1/namespaces/monitoring/services/prometheus-operated:9090/proxy/api/v1/query?query=%s", url.QueryEscape(promQuery))
+	cmdStr := fmt.Sprintf("kubectl get --raw '%s'", apiPath)
 
-	cmd := exec.Command("kubectl", "get", "--raw", apiPath)
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(server, cmdStr)
 	if err != nil {
 		fmt.Printf("      ❌ Failed to query Prometheus: %v\n", err)
 		return
@@ -60,37 +80,27 @@ func checkArgoUnhealthy(alert Alert) {
 		return
 	}
 
-	// 2. Setup Tabwriter for perfect alignment
-	// minwidth, tabwidth, padding, padchar, flags
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
-
 	for _, res := range resp.Data.Result {
-		appName := res.Metric["name"]
-		health := res.Metric["health_status"]
-		sync := res.Metric["sync_status"]
-		destNs := res.Metric["dest_namespace"]
-
-		// We use \t (tab) to separate columns
+		appName := strings.TrimSpace(res.Metric["name"])
 		fmt.Fprintf(w, "      ⚠️  App: %s\t| Health: %s\t| Sync: %s\t| Ns: %s\n",
-			appName, health, sync, destNs)
+			appName, res.Metric["health_status"], res.Metric["sync_status"], res.Metric["dest_namespace"])
 	}
-
-	// Flush the buffer to print aligned output
 	w.Flush()
 	fmt.Println("")
 }
 
-func checkVeleroBackup(alert Alert) {
+func checkVeleroBackup(alert Alert, server string) {
 	fmt.Println("\n   🔍 [Diagnosis] Running: velero get backup (showing top 5)")
 
-	cmd := exec.Command("velero", "get", "backup")
-	output, err := cmd.CombinedOutput()
+	output, err := runCommand(server, "velero get backup")
 	if err != nil {
 		fmt.Printf("      ❌ Failed to run velero: %v\n", err)
 		return
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	cleanOutput := strings.ReplaceAll(string(output), "\r", "")
+	lines := strings.Split(strings.TrimSpace(cleanOutput), "\n")
 
 	limit := 5
 	if len(lines) < limit {
@@ -100,21 +110,21 @@ func checkVeleroBackup(alert Alert) {
 		fmt.Printf("      %s\n", lines[i])
 	}
 
-	// Describe the latest backup
 	if len(lines) > 1 {
 		fields := strings.Fields(lines[1])
 		if len(fields) > 0 {
 			latestBackup := fields[0]
 			fmt.Printf("\n   🔍 [Diagnosis] Describing latest backup: %s\n", latestBackup)
 
-			descCmd := exec.Command("velero", "describe", "backup", latestBackup)
-			descOutput, err := descCmd.CombinedOutput()
+			descCmdStr := fmt.Sprintf("velero describe backup %s --details", latestBackup)
+			descOutput, err := runCommand(server, descCmdStr)
 			if err != nil {
 				fmt.Printf("      ❌ Failed to describe backup: %v\n", err)
 				return
 			}
 
-			descLines := strings.Split(string(descOutput), "\n")
+			cleanDescOutput := strings.ReplaceAll(string(descOutput), "\r", "")
+			descLines := strings.Split(cleanDescOutput, "\n")
 			for _, line := range descLines {
 				fmt.Printf("      %s\n", line)
 			}

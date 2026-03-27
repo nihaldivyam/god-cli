@@ -31,8 +31,9 @@ func printHelp() {
 	fmt.Println("Usage: god alert <command> [flags]")
 	fmt.Println("\nCommands:")
 	fmt.Println("  list     List alerts on current cluster")
-	fmt.Println("  scan     Scan multiple Teleport clusters")
+	fmt.Println("  scan     Scan multiple Teleport clusters or a specific SSH server")
 	fmt.Println("  details  Scan and run diagnostics on matching alerts")
-	fmt.Println("\nFlags:")
-	fmt.Println("  --filter <name>   Filter clusters (required for details)")
+	fmt.Println("\nFlags (scan & details):")
+	fmt.Println("  --filter <name>   Filter clusters via Teleport")
+	fmt.Println("  --server <user@ip> Direct SSH connection to Linux server")
 }

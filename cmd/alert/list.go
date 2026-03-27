@@ -4,14 +4,12 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 )
 
-// Alert represents the JSON structure returned by amtool
+// Alert represents the JSON structure returned by Alertmanager
 type Alert struct {
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
@@ -20,15 +18,15 @@ type Alert struct {
 
 func runList(args []string) {
 	listCmd := flag.NewFlagSet("list", flag.ExitOnError)
-	port := listCmd.String("port", "9093", "Local port to forward to")
+	port := listCmd.String("port", "9093", "Local port (used for api proxy)")
 	namespace := listCmd.String("n", "monitoring", "Namespace of the Alertmanager service")
-	service := listCmd.String("svc", "svc/alertmanager-operated", "Service name to port-forward")
+	service := listCmd.String("svc", "svc/alertmanager-operated", "Service name")
 	listCmd.Parse(args)
 
 	clusterName := getClusterName()
 	fmt.Printf("🌍 Cluster: %s\n", clusterName)
 
-	alerts, err := FetchAlerts(*namespace, *service, *port)
+	alerts, err := FetchAlerts("", *namespace, *service, *port)
 	if err != nil {
 		fmt.Printf("❌ Error: %v\n", err)
 		os.Exit(1)
@@ -37,39 +35,52 @@ func runList(args []string) {
 	printAlerts(alerts)
 }
 
-// FetchAlerts handles the port-forwarding and querying logic
-func FetchAlerts(namespace, service, port string) ([]Alert, error) {
-	// 1. Start Port-Forward
-	// Note: We silence stdout to keep the CLI clean during multi-cluster scans
-	pfCmd := exec.Command("kubectl", "port-forward", service, fmt.Sprintf("%s:%s", port, port), "-n", namespace)
-	if err := pfCmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start port-forward: %v", err)
+// FetchAlerts queries Alertmanager via the Kubernetes API server proxy
+func FetchAlerts(server, namespace, service, port string) ([]Alert, error) {
+	// Clean up service name (e.g., "svc/alertmanager-operated" -> "alertmanager-operated")
+	svcName := strings.TrimPrefix(service, "svc/")
+
+	// Construct the direct API proxy path to the Alertmanager pod
+	apiPath := fmt.Sprintf("/api/v1/namespaces/%s/services/%s:%s/proxy/api/v2/alerts?active=true&inhibited=false&silenced=false&unprocessed=false", namespace, svcName, port)
+
+	var output []byte
+	var err error
+
+	if server != "" {
+		fmt.Println("   [SSH] Fetching alerts... (Touch YubiKey or enter sudo password if prompted)")
+
+		cmdStr := fmt.Sprintf("sudo -i kubectl get --raw '%s'", apiPath)
+		cmd := exec.Command("ssh", "-t", server, cmdStr)
+
+		// Connect Stdin so the TTY can securely receive the YubiKey touch or password
+		cmd.Stdin = os.Stdin
+		output, err = cmd.CombinedOutput()
+	} else {
+		cmd := exec.Command("kubectl", "get", "--raw", apiPath)
+		output, err = cmd.CombinedOutput()
 	}
 
-	// Ensure cleanup
-	defer func() {
-		if pfCmd.Process != nil {
-			pfCmd.Process.Kill()
-		}
-	}()
-
-	// 2. Wait for Port
-	if !waitForPort("localhost", port, 5*time.Second) {
-		return nil, fmt.Errorf("timed out waiting for port-forward")
-	}
-
-	// 3. Query amtool
-	amURL := fmt.Sprintf("http://localhost:%s", port)
-	cmd := exec.Command("amtool", "alert", "--alertmanager.url="+amURL, "-o", "json")
-	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("failed to query alertmanager: %v", err)
+		return nil, fmt.Errorf("failed to fetch alerts: %v\n      Raw Output: %s", err, string(output))
 	}
 
-	// 4. Parse
+	// SSH with a TTY (-t) sometimes injects MOTD before the JSON,
+	// and "Shared connection closed" after the JSON.
+	// We scan the output to find the exact boundaries of the JSON array.
+	outStr := string(output)
+	startIdx := strings.Index(outStr, "[")
+	endIdx := strings.LastIndex(outStr, "]")
+
+	if startIdx == -1 || endIdx == -1 || startIdx > endIdx {
+		return nil, fmt.Errorf("invalid response from alertmanager (expected JSON array): %s", outStr)
+	}
+
+	// Extract purely the JSON part (from the first '[' to the last ']')
+	jsonBytes := []byte(outStr[startIdx : endIdx+1])
+
 	var alerts []Alert
-	if err := json.Unmarshal(output, &alerts); err != nil {
-		return nil, fmt.Errorf("invalid json from amtool: %v", err)
+	if err := json.Unmarshal(jsonBytes, &alerts); err != nil {
+		return nil, fmt.Errorf("failed to parse alerts JSON: %v\n      Extracted String: %s", err, string(jsonBytes))
 	}
 
 	return alerts, nil
@@ -80,6 +91,7 @@ func printAlerts(alerts []Alert) {
 		fmt.Println("✅ No active alerts.")
 		return
 	}
+
 	fmt.Printf("🔥 Found %d active alerts:\n", len(alerts))
 	for _, alert := range alerts {
 		name := alert.Labels["alertname"]
@@ -95,32 +107,22 @@ func printAlerts(alerts []Alert) {
 			ns = "global"
 		}
 
-		fmt.Printf("   🔴 %-35s -> %s/%s\n", name, ns, target)
+		// --- NEW: Extract extra context ---
+		// Look for the "name" label (used by linux systemd alerts)
+		extraContext := ""
+		if val, ok := alert.Labels["name"]; ok {
+			extraContext = fmt.Sprintf("  [%s]", val)
+		}
+
+		fmt.Printf("   🔴 %-35s -> %s/%s%s\n", name, ns, target, extraContext)
 	}
 	fmt.Println("")
 }
 
-// Helper: Get current k8s context
 func getClusterName() string {
 	out, err := exec.Command("kubectl", "config", "current-context").Output()
 	if err != nil {
 		return "Unknown"
 	}
 	return strings.TrimSpace(string(out))
-}
-
-// Helper: Wait for TCP port
-func waitForPort(host, port string, timeout time.Duration) bool {
-	start := time.Now()
-	for {
-		if time.Since(start) > timeout {
-			return false
-		}
-		conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 200*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			return true
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
 }
