@@ -23,13 +23,18 @@ func runDetails(args []string) {
 		os.Exit(1)
 	}
 
+	// --- Smart Namespace Override ---
+	actualNamespace := *namespace
+	if *server != "" && actualNamespace == "monitoring" {
+		actualNamespace = "monitoring-linuxaid"
+	}
+
 	// --- BRANCH 1: Direct SSH Server ---
 	if *server != "" {
 		fmt.Printf("\n--------------------------------------------------\n")
 		fmt.Printf("🌐 Connecting via SSH to: %s\n", *server)
 
-		fmt.Printf("🔌 Establishing SSH tunnel and checking alerts...\n")
-		alerts, err := FetchAlerts(*server, *namespace, *service, *port)
+		alerts, err := FetchAlerts(*server, actualNamespace, *service, *port)
 		if err != nil {
 			fmt.Printf("⚠️  Could not fetch alerts: %v\n", err)
 			return
@@ -84,7 +89,7 @@ func runDetails(args []string) {
 		}
 
 		fmt.Printf("🔌 Checking alerts...\n")
-		alerts, err := FetchAlerts("", *namespace, *service, *port)
+		alerts, err := FetchAlerts("", actualNamespace, *service, *port)
 		if err != nil {
 			fmt.Printf("⚠️  Could not fetch alerts: %v\n", err)
 			continue
@@ -119,7 +124,7 @@ func processAlerts(alerts []Alert, server string) {
 
 		if ruleFunc, exists := DiagnosticRules[name]; exists {
 			if !processedRules[name] {
-				ruleFunc(alert, server) // Pass the server context to the rules engine
+				ruleFunc(alert, server)
 				processedRules[name] = true
 			}
 		}

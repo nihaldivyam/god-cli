@@ -107,7 +107,14 @@ func printAlerts(alerts []Alert) {
 			ns = "global"
 		}
 
-		fmt.Printf("   🔴 %-35s -> %s/%s\n", name, ns, target)
+		// --- NEW: Extract extra context ---
+		// Look for the "name" label (used by linux systemd alerts)
+		extraContext := ""
+		if val, ok := alert.Labels["name"]; ok {
+			extraContext = fmt.Sprintf("  [%s]", val)
+		}
+
+		fmt.Printf("   🔴 %-35s -> %s/%s%s\n", name, ns, target, extraContext)
 	}
 	fmt.Println("")
 }

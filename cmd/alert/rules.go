@@ -10,12 +10,16 @@ import (
 	"text/tabwriter"
 )
 
+// RuleFunc defines the function signature for a diagnostic check
 type RuleFunc func(alert Alert, server string)
 
+// DiagnosticRules maps an "AlertName" to a specific function
 var DiagnosticRules = map[string]RuleFunc{
 	"VeleroUnsuccessfulBackup": checkVeleroBackup,
 	"ArgoCdAppUnhealthy":       checkArgoUnhealthy,
 }
+
+// --- Helper: Command Execution ---
 
 // runCommand executes a shell string locally or remotely over SSH as root
 func runCommand(server, cmdStr string) ([]byte, error) {
@@ -26,8 +30,11 @@ func runCommand(server, cmdStr string) ([]byte, error) {
 		// -t forces PTY so PAM can request the YubiKey
 		return exec.Command("ssh", "-t", server, remoteCmd).CombinedOutput()
 	}
+	// Run locally via shell
 	return exec.Command("sh", "-c", cmdStr).CombinedOutput()
 }
+
+// --- Prometheus Response Structs ---
 
 type PromResponse struct {
 	Status string `json:"status"`
@@ -40,11 +47,19 @@ type PromResponse struct {
 	} `json:"data"`
 }
 
+// --- Rule Implementations ---
+
 func checkArgoUnhealthy(alert Alert, server string) {
 	fmt.Println("\n   🔍 [Diagnosis] Querying Prometheus for unhealthy ArgoCD apps...")
 
+	// Smart Namespace Override for Prometheus queries
+	promNs := "monitoring"
+	if server != "" {
+		promNs = "monitoring-linuxaid"
+	}
+
 	promQuery := `argocd_app_info{health_status!="Healthy"}`
-	apiPath := fmt.Sprintf("/api/v1/namespaces/monitoring/services/prometheus-operated:9090/proxy/api/v1/query?query=%s", url.QueryEscape(promQuery))
+	apiPath := fmt.Sprintf("/api/v1/namespaces/%s/services/prometheus-operated:9090/proxy/api/v1/query?query=%s", promNs, url.QueryEscape(promQuery))
 
 	cmdStr := fmt.Sprintf("kubectl get --raw '%s'", apiPath)
 
